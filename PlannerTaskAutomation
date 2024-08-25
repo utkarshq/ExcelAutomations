@@ -1,0 +1,206 @@
+Option Explicit
+
+' Enumerations for better readability
+Enum ColumnIndexes
+    TitleColumn = 1
+    DueDateColumn = 22
+    AssigneeColumn = 23 ' Column for Assignee Email
+    StatusColumn = 23
+End Enum
+
+' Define constants for configuration values
+
+Const CLIENT_ID As String = "54dsafcd-7dfe-347c-gdf5-f89ewqrb91ef8"
+Const CLIENT_SECRET As String = "42dsaf8Q~qdsafue~kjlkjklweqPBjiq.0bIJ"
+Const TENANT_ID As String = "96dsaf65-9dsaf9-4dsf0-8dsf6-7ewqrqwr06d"
+
+'Default details
+Const DEFAULT_ASSIGNEE_ID As String = "387ec9b8-30ace-srd8-b789-cdf57ec33e79"
+
+'Values from microsoft team
+Const PLAN_ID As String = "zFTpSdsafadsBKTza-O2QAAOLP"
+Const BUCKET_ID As String = "lqvdsafadsq3LGSmQABT68"
+
+
+' Constants for Planner API and Sheet Name
+Const API_ENDPOINT As String = "https://graph.microsoft.com/v1.0/planner/tasks"
+Const SHEET_NAME As String = "Sheet1"
+
+
+' Function to obtain access token from Microsoft OAuth
+Function GetAccessToken() As String
+    On Error GoTo ErrorHandler
+
+    Dim xmlHttp As Object
+    Set xmlHttp = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+
+    Dim sUrl As String
+    sUrl = "https://login.microsoftonline.com/" & TENANT_ID & "/oauth2/v2.0/token"
+
+    Dim sBody As String
+    sBody = "grant_type=client_credentials" & _
+            "&client_id=" & CLIENT_ID & _
+            "&client_secret=" & CLIENT_SECRET & _
+            "&scope=https://graph.microsoft.com/.default"
+
+    xmlHttp.Open "POST", sUrl, False
+    xmlHttp.SetRequestHeader "Content-Type", "application/x-www-form-urlencoded"
+    xmlHttp.Send sBody
+
+    Dim jsonResponse As Object
+    Set jsonResponse = JsonConverter.ParseJson(xmlHttp.ResponseText)
+
+    GetAccessToken = jsonResponse("access_token")
+    Exit Function
+
+ErrorHandler:
+    MsgBox "Error obtaining access token: " & Err.Description
+    GetAccessToken = ""
+End Function
+' Function to get the userid
+Function GetUserIDFromEmail(ByVal Email As String, ByVal AccessToken As String) As String
+    On Error GoTo ErrorHandler
+
+    Dim xmlHttp As Object
+    Set xmlHttp = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+
+    Dim url As String
+    url = "https://graph.microsoft.com/v1.0/users/" & URLEncode(Email)
+
+    xmlHttp.Open "GET", url, False
+    xmlHttp.SetRequestHeader "Authorization", "Bearer " & AccessToken
+    xmlHttp.Send
+
+    If xmlHttp.Status = 200 Then
+        Dim jsonResponse As Object
+        Set jsonResponse = JsonConverter.ParseJson(xmlHttp.ResponseText)
+        GetUserIDFromEmail = jsonResponse("id")
+    Else
+        GetUserIDFromEmail = "Error: " & xmlHttp.Status & " - " & xmlHttp.ResponseText
+    End If
+
+    Exit Function
+
+ErrorHandler:
+    GetUserIDFromEmail = "Error: " & Err.Description
+End Function
+
+' Helper Function to URL Encode the email address
+Function URLEncode(ByVal Text As String) As String
+    On Error Resume Next
+    Dim ScriptEngine As Object
+    Set ScriptEngine = CreateObject("ScriptControl")
+    ScriptEngine.Language = "JScript"
+
+    URLEncode = ScriptEngine.CodeObject.encodeURIComponent(Text)
+    If Err.Number <> 0 Then
+        URLEncode = Text ' If error, return original text
+    End If
+End Function
+
+
+
+' Function to create a task in Planner
+Function CreateTask(ByVal TaskTitle As String, ByVal DueDate As Date, ByVal Assignee As String, ByVal AccessToken As String) As String
+    On Error GoTo ErrorHandler
+
+    ' Convert DueDate to ISO 8601 format
+    Dim DueDateISO As String
+    DueDateISO = Format(DueDate, "yyyy-mm-ddThh:mm:ssZ")
+
+    ' JSON body for creating the task
+    Dim JsonBody As String
+    JsonBody = "{""planId"": """ & PLAN_ID & """, ""bucketId"": """ & BUCKET_ID & """, ""title"": """ & TaskTitle & """, ""dueDateTime"": """ & DueDateISO & """"
+
+    ' Add Assignee if provided
+    If Assignee <> "" Then
+        JsonBody = JsonBody & ", ""assignments"": {""" & Assignee & """: {""@odata.type"": ""#microsoft.graph.plannerAssignment"", ""orderHint"": "" !""}}"
+    End If
+
+    JsonBody = JsonBody & "}"
+
+    ' Setup HTTP Request
+    Dim xmlHttp As Object
+    Set xmlHttp = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    xmlHttp.Open "POST", API_ENDPOINT, False
+    xmlHttp.SetRequestHeader "Content-Type", "application/json"
+    xmlHttp.SetRequestHeader "Authorization", "Bearer " & AccessToken
+    xmlHttp.Send JsonBody
+
+    ' Check response
+    If xmlHttp.Status <> 201 Then
+        CreateTask = "Error: " & xmlHttp.ResponseText
+    Else
+        CreateTask = "Task Created Successfully"
+    End If
+
+    Exit Function
+
+ErrorHandler:
+    CreateTask = "Error: " & Err.Description
+End Function
+
+' Subroutine to create Planner tasks from selected rows
+Sub CreatePlannerTasks()
+    Dim AssigneeEmail As String
+    Dim AssigneeID As String
+    Dim AccessToken As String
+    AccessToken = GetAccessToken()
+    If AccessToken = "" Then Exit Sub
+
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(SHEET_NAME)
+
+    Dim rng As Range
+    Set rng = Selection
+
+    Dim cell As Range
+    For Each cell In rng.Rows
+       If Not cell.Hidden Then 'last changes for hidden rows If Not row.Hidden Then
+       
+        Dim TaskTitle As String
+        TaskTitle = "Verjährung " & ws.Cells(cell.Row, ColumnIndexes.TitleColumn).Value
+
+        Dim DueDate As Variant
+        DueDate = ws.Cells(cell.Row, ColumnIndexes.DueDateColumn).Value
+        If IsEmpty(DueDate) Or Not IsDate(DueDate) Then
+            ws.Cells(cell.Row, ColumnIndexes.StatusColumn).Value = "No Date or Invalid Date - Skipped"
+            GoTo NextRow
+        End If
+        
+          AssigneeEmail = ws.Cells(cell.Row, ColumnIndexes.AssigneeColumn).Value
+        If AssigneeEmail <> "" Then
+            AssigneeID = GetUserIDFromEmail(AssigneeEmail, AccessToken)
+            If Left(AssigneeID, 6) = "Error:" Then
+                ' If error in fetching AssigneeID, use the default ID
+                AssigneeID = DEFAULT_ASSIGNEE_ID
+                ' Optionally, you can also mark this in your worksheet
+                ws.Cells(cell.Row, ColumnIndexes.StatusColumn).Value = "Default assignee used due to error"
+            Else
+                ' Store the fetched AssigneeID in column 25 (Y)
+                ws.Cells(cell.Row, 25).Value = AssigneeID
+            End If
+        Else
+            ' If no AssigneeEmail is provided, use the default ID
+            AssigneeID = DEFAULT_ASSIGNEE_ID
+        End If
+        
+
+        ' Create the main task
+        Dim TaskStatus As String
+        TaskStatus = CreateTask(TaskTitle, CDate(DueDate), AssigneeID, AccessToken)
+        ws.Cells(cell.Row, ColumnIndexes.StatusColumn).Value = TaskStatus
+
+        ' Create a reminder task 4 weeks before the due date
+        Dim ReminderDate As Date
+        ReminderDate = DateAdd("ww", -4, CDate(DueDate))
+        TaskStatus = CreateTask("Reminder: " & TaskTitle, ReminderDate, AssigneeID, AccessToken)
+        ws.Cells(cell.Row, ColumnIndexes.StatusColumn).Value = TaskStatus & "; Reminder Set"
+       End If 'last changes for hidden rows
+NextRow:
+    Next cell
+
+    MsgBox "Process Completed. Check Column X for status."
+End Sub
+
+
